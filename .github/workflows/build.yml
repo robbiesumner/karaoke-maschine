@@ -1,0 +1,85 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  x86_64:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build buildroot host image
+        uses: docker/build-push-action@v6
+        with:
+          context: docker
+          tags: karaoke-maschine/buildroot:bookworm
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Cache upstream package tarballs across runs. Keyed on the defconfig so
+      # a config change invalidates and re-downloads only what differs.
+      - name: Cache buildroot dl/
+        uses: actions/cache@v4
+        with:
+          path: dl
+          key: br-dl-x86_64-${{ hashFiles('configs/karaoke_x86_64_defconfig') }}
+          restore-keys: |
+            br-dl-x86_64-
+
+      # Container runs as UID 1000 ('build'); GitHub runner is UID 1001. Pre-
+      # create the dirs and hand ownership to UID 1000 so the container can
+      # write into them.
+      - name: Prepare workspace ownership
+        run: |
+          mkdir -p output dl
+          sudo chown -R 1000:1000 output dl
+
+      - name: Configure buildroot
+        run: |
+          docker run --rm \
+            -v "$PWD:/build" \
+            -e BR2_DL_DIR=/build/dl \
+            -w /build \
+            karaoke-maschine/buildroot:bookworm \
+            make O=/build/output -C /build/buildroot \
+              defconfig BR2_DEFCONFIG=/build/configs/karaoke_x86_64_defconfig
+
+      - name: Build buildroot
+        run: |
+          docker run --rm \
+            -v "$PWD:/build" \
+            -e BR2_DL_DIR=/build/dl \
+            -w /build \
+            karaoke-maschine/buildroot:bookworm \
+            make O=/build/output -C /build/buildroot
+
+      - name: Upload images
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: karaoke-x86_64-images
+          path: output/images/
+          retention-days: 14
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: karaoke-x86_64-build-log
+          path: |
+            output/build/build-time.log
+            output/build/*/.stamp_*
+            output/.config
+          retention-days: 7
+          if-no-files-found: ignore
